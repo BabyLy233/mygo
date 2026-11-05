@@ -541,8 +541,38 @@ func (e *dwrite) format(style Style) uintptr {
 			release(f1)
 		}
 	}
+	// Tabs stop every four spaces, as on the other systems, not every
+	// four ems.
+	if f := e.font(style); f != nil {
+		if stop := tabStops * spaceAdvance(f); stop > 0 {
+			method[func(this uintptr, stop float32) uintptr](format, formatSetIncrementalTabStop)(format, stop)
+		}
+	}
 	e.formats[key] = format
 	return format
+}
+
+const (
+	// tabStops is how many spaces apart tabs stop.
+	tabStops = 4
+
+	faceGetDesignGlyphMetrics   = 10 // IDWriteFontFace
+	formatSetIncrementalTabStop = 8  // IDWriteTextFormat
+)
+
+// spaceAdvance is the width of a font's space.
+func spaceAdvance(f *Font) float32 {
+	sp, glyph := uint32(' '), uint16(0)
+	if failed(call(f.native, faceGetGlyphIndices, uintptr(unsafe.Pointer(&sp)), 1, uintptr(unsafe.Pointer(&glyph)))) || glyph == 0 {
+		return 0
+	}
+	var gm [7]int32 // DWRITE_GLYPH_METRICS, advanceWidth second
+	if failed(call(f.native, faceGetDesignGlyphMetrics, uintptr(unsafe.Pointer(&glyph)), 1, uintptr(unsafe.Pointer(&gm[0])), 0)) {
+		return 0
+	}
+	var m dwFontMetrics
+	call(f.native, faceGetMetrics, uintptr(unsafe.Pointer(&m)))
+	return float32(uint32(gm[1])) * f.Size / float32(max(m.designUnitsPerEm, 1))
 }
 
 // fallback returns a font fallback trying the families of a list after the
@@ -849,13 +879,17 @@ func (e *dwrite) shape(text []rune, style Style, spans []Span, width float32, rt
 }
 
 // tabs gives the tabs of a text layout their glyphs. DirectWrite shapes a
-// tab as a control, with nothing to draw, and draws no run of it: its
-// lines would have no glyphs for their tabs, and those starting with tabs
-// would lose their indent. Each tab no drawn run holds becomes an empty
-// glyph, the font's space, as wide as the layout makes it, to its stop.
+// tab as a control, with nothing to draw, and draws a run of it with no
+// glyphs, or none: its lines would have no glyphs for their tabs, and
+// those starting with tabs would lose their indent. Each tab no run draws
+// a glyph of becomes an empty glyph, the font's space, as wide as the
+// layout makes it, to its stop.
 func (e *dwrite) tabs(layout uintptr, style Style, u16 []uint16, index []int, runs []dwRun, lines []shapedLine, ends []uint32) {
 	drawn := make([]bool, len(u16))
 	for _, r := range runs {
+		if len(r.glyphs) == 0 {
+			continue
+		}
 		for i := r.pos; i < r.pos+r.n && int(i) < len(drawn); i++ {
 			drawn[i] = true
 		}
